@@ -2,48 +2,27 @@
 # Star Rupture Server Stop Script
 # Gracefully stops the server with timeout
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+set -e
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib_common.sh" 2>/dev/null || source "/scripts/lib_common.sh"
+
+# Handle --help
+if check_help_flag "$@"; then
+    show_help "stop.sh" "Gracefully stops the Star Rupture server with timeout fallback"
+    exit 0
+fi
 
 PID_FILE="${GAME_DIR}/server.pid"
 TIMEOUT=${SERVER_SHUTDOWN_TIMEOUT:-30}
-
-# Get server PID
-get_server_pid() {
-    # Try PID file first
-    if [ -f "$PID_FILE" ]; then
-        local pid=$(cat "$PID_FILE")
-        if kill -0 "$pid" 2>/dev/null; then
-            echo "$pid"
-            return 0
-        fi
-    fi
-
-    # Try to find by process name
-    local pid=$(pgrep -f "StarRuptureServerEOS" 2>/dev/null | head -1)
-    if [ -n "$pid" ]; then
-        echo "$pid"
-        return 0
-    fi
-
-    echo "0"
-    return 1
-}
 
 # Main
 main() {
     log_info "Stopping Star Rupture server..."
 
-    local server_pid=$(get_server_pid)
+    local server_pid
+    server_pid=$(get_server_pid "$PID_FILE")
 
     if [ "$server_pid" = "0" ]; then
         log_info "Server is not running"

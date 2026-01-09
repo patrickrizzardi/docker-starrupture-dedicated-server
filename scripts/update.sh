@@ -4,57 +4,81 @@
 
 # Note: NOT using set -e because we need retry logic to handle SteamCMD failures
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib_common.sh" 2>/dev/null || source "/scripts/lib_common.sh"
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# Handle --help
+if check_help_flag "$@"; then
+    show_help "update.sh" "Downloads or updates the Star Rupture server via SteamCMD" \
+        "--force    Force update even if already up to date"
+    exit 0
+fi
 
 # Paths
 CURRENT_BUILD_ID_FILE="${GAME_DIR}/current_build_id.txt"
 APP_MANIFEST="${GAME_DIR}/steamapps/appmanifest_${STAR_APPID}.acf"
 
-# Get the latest available build ID from Steam
+# Build ID caching (Perf #2)
+BUILD_ID_CACHE="${GAME_DIR}/.build_id_cache"
+CACHE_TTL=${BUILD_ID_CACHE_TTL:-3600}  # 1 hour default
+
+# Get the latest available build ID from Steam (with caching)
 get_current_build_id() {
+    # Check cache first (Perf #2)
+    if [ -f "$BUILD_ID_CACHE" ]; then
+        local cache_mtime
+        cache_mtime=$(stat -c %Y "$BUILD_ID_CACHE" 2>/dev/null || echo 0)
+        local now
+        now=$(date +%s)
+        local cache_age=$((now - cache_mtime))
+
+        if [ $cache_age -lt $CACHE_TTL ]; then
+            local cached
+            cached=$(cat "$BUILD_ID_CACHE" 2>/dev/null | tr -d '[:space:]')
+            if validate_build_id "$cached"; then
+                log_info "Using cached build ID: $cached (age: ${cache_age}s)"
+                echo "$cached"
+                return 0
+            fi
+        fi
+    fi
+
     log_info "Querying Steam for latest build ID..."
 
-    local steamcmd_output=$("${STEAM_DIR}/steamcmd.sh" +login anonymous +app_info_print ${STAR_APPID} +quit 2>/dev/null)
+    local steamcmd_output
+    steamcmd_output=$("${STEAM_DIR}/steamcmd.sh" +login anonymous +app_info_print ${STAR_APPID} +quit 2>/dev/null)
 
-    local build_id=$(echo "$steamcmd_output" | \
+    local build_id
+    build_id=$(echo "$steamcmd_output" | \
         grep -A 150 "\"branches\"" | \
         grep -A 50 "\"public\"" | \
         grep -m 1 -oP "\"buildid\"\s*\"*\K[0-9]+" | \
         head -n 1 | \
         tr -d '[:space:]')
 
-    if [ -z "$build_id" ] || ! [[ "$build_id" =~ ^[0-9]+$ ]]; then
-        log_warning "Could not retrieve build ID from Steam"
+    # Bug #4 fix - validate build ID is positive integer
+    if ! validate_build_id "$build_id"; then
+        log_warning "Invalid build ID from Steam: '$build_id'"
         echo "unknown"
         return 1
     fi
 
+    # Cache valid result
+    echo "$build_id" > "$BUILD_ID_CACHE"
     echo "$build_id"
 }
 
 # Get the installed build ID from app manifest
 get_installed_build_id() {
-    if [ ! -f "$APP_MANIFEST" ]; then
+    local build_id
+    build_id=$(get_build_id_from_manifest "$APP_MANIFEST")
+
+    # Handle not installed case
+    if [ "$build_id" = "not_installed" ]; then
         log_info "No app manifest found (first install)"
         echo "none"
         return 0
-    fi
-
-    local build_id=$(grep -oP '"buildid"\s*"\K[^"]+' "$APP_MANIFEST" 2>/dev/null || echo "")
-
-    if [ -z "$build_id" ]; then
-        echo "unknown"
-        return 1
     fi
 
     echo "$build_id"
@@ -62,8 +86,10 @@ get_installed_build_id() {
 
 # Check if update is needed
 needs_update() {
-    local current_build=$(get_current_build_id)
-    local installed_build=$(get_installed_build_id)
+    local current_build
+    current_build=$(get_current_build_id)
+    local installed_build
+    installed_build=$(get_installed_build_id)
 
     log_info "Steam build:     $current_build"
     log_info "Installed build: $installed_build"
@@ -84,6 +110,7 @@ needs_update() {
 }
 
 # Check if files exist in staging area and move them
+# This handles the SteamCMD 0x602 verification bug
 recover_staged_files() {
     local staging_dir="${GAME_DIR}/steamapps/downloading/${STAR_APPID}"
     local staged_exe="${staging_dir}/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe"
@@ -156,14 +183,16 @@ run_steamcmd() {
 
         # Check if exe exists in main location OR staging
         if [ -f "${GAME_DIR}/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe" ]; then
-            log_success "Server executable found despite exit code $status"
+            # UX #1 fix - warn instead of success for fallback scenarios
+            log_warning "Server found despite SteamCMD exit code $status - proceeding with caution"
             return 0
         fi
 
         # Check staging directory (verification may have failed but files are usable)
         local staging_exe="${GAME_DIR}/steamapps/downloading/${STAR_APPID}/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe"
         if [ -f "$staging_exe" ]; then
-            log_success "Server executable found in staging (verification incomplete, but usable)"
+            log_warning "Server found in staging (verification incomplete) - monitor logs closely"
+            log_info "If issues occur, try: update.sh --force"
             return 0
         fi
 
@@ -190,7 +219,8 @@ run_steamcmd() {
 do_update() {
     log_info "Starting Star Rupture server download/update..."
 
-    local start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
     local is_fresh_install=false
 
     # Check if this is a fresh install (no exe yet)
@@ -214,14 +244,17 @@ do_update() {
         fi
     fi
 
-    local elapsed=$(($(date +%s) - start_time))
+    local elapsed=$(( $(date +%s) - start_time ))
     log_success "Update completed in ${elapsed}s"
 
-    # Update cached build ID
-    local new_build=$(get_installed_build_id)
-    if [ "$new_build" != "unknown" ] && [ "$new_build" != "none" ] && [ "$new_build" != "0" ]; then
+    # Update cached build ID (Bug #4 fix - validate before caching)
+    local new_build
+    new_build=$(get_installed_build_id)
+    if validate_build_id "$new_build"; then
         echo "$new_build" > "$CURRENT_BUILD_ID_FILE"
         log_info "Cached build ID: $new_build"
+    else
+        log_warning "Skipped caching invalid build ID: '$new_build'"
     fi
 
     # Cleanup temp files
@@ -238,6 +271,8 @@ main() {
     # Handle --force flag
     if [ "$1" = "--force" ]; then
         log_info "Force update requested"
+        # Invalidate cache on force update
+        rm -f "$BUILD_ID_CACHE" 2>/dev/null || true
         do_update
         exit $?
     fi

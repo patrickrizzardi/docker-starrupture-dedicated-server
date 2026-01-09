@@ -4,17 +4,15 @@
 
 set -e
 
-# Colors
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m'
+# Source shared library
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib_common.sh" 2>/dev/null || source "/scripts/lib_common.sh"
 
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# Handle --help
+if check_help_flag "$@"; then
+    show_help "start.sh" "Starts the Star Rupture server using Wine"
+    exit 0
+fi
 
 # Server executable path - check main location and staging fallback
 SERVER_EXE="${GAME_DIR}/StarRupture/Binaries/Win64/StarRuptureServerEOS-Win64-Shipping.exe"
@@ -30,16 +28,15 @@ else
     GAME_BASE="${GAME_DIR}"
 fi
 
-# Check if already running
-if [ -f "$PID_FILE" ]; then
-    existing_pid=$(cat "$PID_FILE")
-    if kill -0 "$existing_pid" 2>/dev/null; then
-        log_warning "Server already running (PID: $existing_pid)"
-        exit 0
-    fi
-    # Stale PID file
-    rm -f "$PID_FILE"
+# Check if already running (uses shared get_server_pid with Bug #3 fix)
+existing_pid=$(get_server_pid "$PID_FILE") || true
+if [ "$existing_pid" != "0" ]; then
+    log_warning "Server already running (PID: $existing_pid)"
+    exit 0
 fi
+
+# Clean up stale PID file if exists
+rm -f "$PID_FILE"
 
 # Check if server executable exists
 if [ ! -f "$SERVER_EXE" ]; then
@@ -48,24 +45,29 @@ if [ ! -f "$SERVER_EXE" ]; then
     exit 1
 fi
 
-# Get ports from environment or use defaults
+# Get ports and server name from environment or use defaults
 PORT=${SERVER_PORT:-7777}
 QUERY=${QUERY_PORT:-27015}
+SERVER_NAME=${SERVER_NAME:-"StarRuptureServer"}
 
 log_info "Starting Star Rupture server..."
-log_info "  Game Port:  $PORT/udp"
+log_info "  Server:     $SERVER_NAME"
+log_info "  Game Port:  $PORT/udp+tcp"
 log_info "  Query Port: $QUERY/udp"
 
 # Create logs directory
 mkdir -p "${GAME_BASE}/StarRupture/Saved/Logs" 2>/dev/null || true
 
-# Launch server with Wine
-cd "${GAME_BASE}/StarRupture/Binaries/Win64"
+# Launch server with Wine (Bug #5 fix - safe_cd validates directory)
+safe_cd "${GAME_BASE}/StarRupture/Binaries/Win64"
 
-wine64 "$SERVER_EXE" \
+# Use xvfb-run for cleaner display handling (like indifferentbroccoli's approach)
+xvfb-run --auto-servernum wine64 "$SERVER_EXE" \
     -Log \
-    -port=$PORT \
-    -queryport=$QUERY \
+    -Port=$PORT \
+    -QueryPort=$QUERY \
+    -ServerName="$SERVER_NAME" \
+    -MULTIHOME=0.0.0.0 \
     &
 
 SERVER_PID=$!
