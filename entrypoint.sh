@@ -4,17 +4,11 @@
 
 set -e
 
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
-log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_success() { echo -e "${GREEN}[OK]${NC} $1"; }
-log_warning() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_error() { echo -e "${RED}[ERROR]${NC} $1"; }
+# Source shared library
+source "/scripts/lib_common.sh" 2>/dev/null || {
+    echo "[ERROR] Failed to source lib_common.sh"
+    exit 1
+}
 
 # Cleanup function for graceful shutdown
 cleanup() {
@@ -25,9 +19,9 @@ cleanup() {
         "${SCRIPTS_DIR}/stop.sh"
     fi
 
-    # Kill Xvfb
-    if [ -n "$XVFB_PID" ] && kill -0 $XVFB_PID 2>/dev/null; then
-        kill $XVFB_PID 2>/dev/null || true
+    # Kill Xvfb (Bug #2 fix - quoted PID variable)
+    if [ -n "$XVFB_PID" ] && kill -0 "$XVFB_PID" 2>/dev/null; then
+        kill "$XVFB_PID" 2>/dev/null || true
     fi
 
     log_info "Shutdown complete"
@@ -40,15 +34,17 @@ trap cleanup SIGTERM SIGINT SIGHUP
 # Make sure WINEPREFIX directory exists
 mkdir -p "${WINEPREFIX}" 2>/dev/null || true
 
-# Pre-create game directories with correct ownership
+# Pre-create game directories with correct ownership (Perf #3 - batch creation)
 # This prevents SteamCMD from creating them as root
 log_info "Ensuring directory permissions..."
-mkdir -p "${GAME_DIR}/StarRupture/Binaries/Win64" 2>/dev/null || true
-mkdir -p "${GAME_DIR}/StarRupture/Content" 2>/dev/null || true
-mkdir -p "${GAME_DIR}/StarRupture/Plugins" 2>/dev/null || true
-mkdir -p "${GAME_DIR}/StarRupture/Saved" 2>/dev/null || true
-mkdir -p "${GAME_DIR}/Engine" 2>/dev/null || true
-mkdir -p "${GAME_DIR}/steamapps" 2>/dev/null || true
+mkdir -p \
+    "${GAME_DIR}/StarRupture/Binaries/Win64" \
+    "${GAME_DIR}/StarRupture/Content" \
+    "${GAME_DIR}/StarRupture/Plugins" \
+    "${GAME_DIR}/StarRupture/Saved" \
+    "${GAME_DIR}/Engine" \
+    "${GAME_DIR}/steamapps" \
+    2>/dev/null || log_warning "Some directories failed to create"
 
 # Set up virtual display for Wine
 log_info "Setting up virtual display..."
@@ -57,17 +53,41 @@ mkdir -p /tmp/.X11-unix 2>/dev/null || true
 # Clean up stale X lock files (from previous container runs)
 rm -f /tmp/.X99-lock 2>/dev/null || true
 
-# Start Xvfb
+# Start Xvfb (Bug #1 fix - socket-based readiness check instead of PID)
 Xvfb :99 -screen 0 1024x768x16 -ac &
 XVFB_PID=$!
-sleep 2
 
-# Verify X server started
-if ! ps -p $XVFB_PID >/dev/null 2>&1; then
-    log_warning "Failed to start X server, trying alternate approach..."
+# Wait for X server socket (more reliable than PID check)
+for i in {1..10}; do
+    if [ -S /tmp/.X11-unix/X99 ]; then
+        log_info "X server started successfully"
+        break
+    fi
+    sleep 1
+done
+
+# Fallback if primary approach failed
+if ! [ -S /tmp/.X11-unix/X99 ]; then
+    log_warning "Primary X server failed, trying alternate approach..."
+    # Kill the failed attempt first (Bug #1 fix)
+    kill "$XVFB_PID" 2>/dev/null || true
+    sleep 1
+
     Xvfb :99 -nolisten tcp -screen 0 1024x768x16 &
     XVFB_PID=$!
-    sleep 2
+
+    for i in {1..10}; do
+        if [ -S /tmp/.X11-unix/X99 ]; then
+            log_info "X server started successfully (alternate approach)"
+            break
+        fi
+        sleep 1
+    done
+
+    if ! [ -S /tmp/.X11-unix/X99 ]; then
+        log_error "Failed to start X server after multiple attempts"
+        exit 1
+    fi
 fi
 
 # Initialize Wine
@@ -101,15 +121,34 @@ SERVER_PID=$!
 # Wait a moment for server to initialize
 sleep 5
 
-# Tail logs to keep container alive (use -F for rotation handling)
+# Tail logs to keep container alive (Perf #1 - timeout for log file wait)
 LOG_DIR="${GAME_DIR}/StarRupture/Saved/Logs"
 if [ -d "$LOG_DIR" ]; then
-    log_info "Tailing server logs..."
-    # Wait for log file to exist
-    while [ ! -f "${LOG_DIR}/StarRupture.log" ]; do
-        sleep 2
+    log_info "Waiting for server log file..."
+
+    log_wait=0
+    max_wait=60
+
+    while [ $log_wait -lt $max_wait ]; do
+        if [ -f "${LOG_DIR}/StarRupture.log" ]; then
+            log_info "Tailing server logs..."
+            tail -F "${LOG_DIR}/StarRupture.log" 2>/dev/null &
+            break
+        fi
+
+        # Check if server still alive
+        if ! kill -0 $SERVER_PID 2>/dev/null; then
+            log_error "Server died before creating log file"
+            exit 1
+        fi
+
+        sleep 1
+        log_wait=$((log_wait + 1))
     done
-    tail -F "${LOG_DIR}/StarRupture.log" 2>/dev/null &
+
+    if [ $log_wait -ge $max_wait ]; then
+        log_warning "Log file not found after ${max_wait}s, continuing without tail"
+    fi
 fi
 
 # Wait for server process
