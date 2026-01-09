@@ -19,15 +19,17 @@ services:
       - ./entrypoint.sh:/entrypoint.sh
     ports:
       # Game port (UDP for gameplay, TCP for initial connection)
-      - "7777:7777/udp"
-      - "7777:7777/tcp"
+      # Using 8888 instead of 7777 - known issue with default port
+      - "8888:8888/udp"
+      - "8888:8888/tcp"
       # Steam query port
       - "27015:27015/udp"
       # EOS/Epic Online Services port
       - "30020:30020/tcp"
     environment:
       # Server configuration
-      SERVER_PORT: "7777"
+      SERVER_NAME: "StarRuptureServer"
+      SERVER_PORT: "8888"
       QUERY_PORT: "27015"
       # Set to "true" to skip update check on startup
       SKIP_UPDATE: "false"
