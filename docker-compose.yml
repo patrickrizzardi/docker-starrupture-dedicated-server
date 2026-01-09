@@ -1,0 +1,48 @@
+services:
+  starrupture:
+    # Enable color output in logs
+    tty: true
+    # Increase grace period for clean shutdown
+    stop_grace_period: 30s
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      # Shared SteamCMD volume - can be reused by ARK ASA
+      - steam_data:/steam
+      # Game installation and save data
+      - starrupture_data:/starrupture
+      # Host-mounted config for easy editing (created after first run)
+      - ./config:/starrupture/StarRupture/Saved/Config/WindowsServer
+      # Dev: mount scripts so changes don't require rebuild
+      - ./scripts:/scripts
+      - ./entrypoint.sh:/entrypoint.sh
+    ports:
+      # Game port (UDP for gameplay, TCP for initial connection)
+      - "7777:7777/udp"
+      - "7777:7777/tcp"
+      # Steam query port
+      - "27015:27015/udp"
+      # EOS/Epic Online Services port
+      - "30020:30020/tcp"
+    environment:
+      # Server configuration
+      SERVER_PORT: "7777"
+      QUERY_PORT: "27015"
+      # Set to "true" to skip update check on startup
+      SKIP_UPDATE: "false"
+    deploy:
+      resources:
+        limits:
+          # Adjust based on your system - Star Rupture requirements TBD
+          memory: 8g
+    restart: unless-stopped
+
+volumes:
+  # Shared Steam/SteamCMD installation
+  # Use explicit name so ARK ASA can reference the same volume
+  steam_data:
+    name: shared_steam_data
+  # Star Rupture game files and saves
+  starrupture_data:
+    name: starrupture_data

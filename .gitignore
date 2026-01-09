@@ -1,0 +1,12 @@
+# Config files (created at runtime, may contain server passwords)
+config/
+
+# Session/IDE
+.claude/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
